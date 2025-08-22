@@ -10,11 +10,16 @@ pub fn main() !void {
 
     const options = flags.parse(args, "overview", Flags, .{});
 
-    try std.json.stringify(
+    var stdout_buffer: [256]u8 = undefined;
+    var stdout_writer = std.fs.File.stderr().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    
+    try std.json.Stringify.value(
         options,
         .{ .whitespace = .indent_2 },
-        std.io.getStdOut().writer(),
+        stdout,
     );
+    try stdout.flush();
 }
 
 const Flags = struct {

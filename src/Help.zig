@@ -18,11 +18,13 @@ pub const Usage = struct {
     body: []const u8,
 
     pub fn render(usage: Usage, stdout: File, colors: *const ColorScheme) void {
-        const term = Terminal.init(stdout);
-        usage.renderToTerminal(term, colors);
+        var writer_buffer: [256]u8 = undefined;
+        var term = Terminal.init(stdout, &writer_buffer);
+        usage.renderToTerminal(&term, colors);
+        term.flush();
     }
 
-    pub fn renderToTerminal(usage: Usage, term: Terminal, colors: *const ColorScheme) void {
+    pub fn renderToTerminal(usage: Usage, term: *Terminal, colors: *const ColorScheme) void {
         term.print(colors.header, "Usage: ", .{});
         term.print(colors.command_name, "{s}", .{usage.command});
         term.print(colors.usage, "{s}\n", .{usage.body});
@@ -100,8 +102,9 @@ const Section = struct {
 };
 
 pub fn render(help: *const Help, stdout: File, colors: *const ColorScheme) void {
-    const term = Terminal.init(stdout);
-    help.usage.renderToTerminal(term, colors);
+    var write_buffer: [256]u8 = undefined;
+    var term = Terminal.init(stdout, &write_buffer);
+    help.usage.renderToTerminal(&term, colors);
 
     if (help.description) |description| {
         term.print(colors.command_description, "\n{s}\n", .{description});
@@ -137,6 +140,8 @@ pub fn render(help: *const Help, stdout: File, colors: *const ColorScheme) void 
             term.print(&.{}, "\n", .{});
         }
     }
+
+    term.flush();
 }
 
 pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Help {
@@ -181,7 +186,7 @@ pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Help {
     help.sections = help.sections ++ .{options};
 
     if (info.positionals.len > 0) {
-        const pos_descriptions = meta.getDescriptions(std.meta.FieldType(Flags, .positional));
+        const pos_descriptions = meta.getDescriptions(@FieldType(Flags, "positional"));
         var arguments = Section{ .header = "Arguments:" };
         for (info.positionals) |arg| {
             arguments.add(.{
@@ -203,7 +208,7 @@ pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Help {
         help.sections = help.sections ++ .{arguments};
     }
     if (info.subcommands.len > 0) {
-        const cmd_descriptions = meta.getDescriptions(std.meta.FieldType(Flags, .command));
+        const cmd_descriptions = meta.getDescriptions(@FieldType(Flags, "command"));
         var commands = Section{ .header = "Commands:" };
         for (info.subcommands) |cmd| commands.add(.{
             .name = cmd.command_name,
