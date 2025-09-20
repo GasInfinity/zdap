@@ -1,5 +1,5 @@
 const std = @import("std");
-const flags = @import("flags");
+const zdap = @import("zdap");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -8,7 +8,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(gpa.allocator());
     defer std.process.argsFree(gpa.allocator(), args);
 
-    const options = flags.parse(args, "trailing", Flags, .{});
+    const options = zdap.parse(args, "trailing", Flags, .{});
 
     var stdout_buffer: [256]u8 = undefined;
     var stdout_writer = std.fs.File.stderr().writer(&stdout_buffer);
@@ -25,16 +25,16 @@ pub fn main() !void {
 const Flags = struct {
     some_flag: bool,
 
-    positional: struct {
+    @"--": struct {
         some_number: i32,
         maybe_number: ?i32,
 
-        // The specially named 'trailing' positional field can be used to collect the remaining
+        // The specially named '...' positional field can be used to collect the remaining
         // positional arguments after all others have been parsed.
         //
         // Any argument after the first trailing positional argument will be included here, and
         // will not be parsed as a flag or command, even if it matches one, so having both a
         // trailing positional field and a command field is redundant.
-        trailing: []const []const u8,
+        @"...": []const []const u8,
     },
 };

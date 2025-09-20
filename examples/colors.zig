@@ -1,5 +1,5 @@
 const std = @import("std");
-const flags = @import("flags");
+const zdap = @import("zdap");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -8,11 +8,11 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(gpa.allocator());
     defer std.process.argsFree(gpa.allocator(), args);
 
-    _ = flags.parse(args, "colors", Flags, .{
+    _ = zdap.parse(args, "colors", Flags, .{
         // Use the `colors` option to provide a colorscheme for the error/help messages.
         // Specifying this as empty: `.colors = &.{}` will disable colors.
         // Each field is a list of type `std.io.tty.Color`.
-        .colors = &flags.ColorScheme{
+        .colors = &zdap.ColorScheme{
             .error_label = &.{ .bright_red, .bold },
             .command_name = &.{.bright_green},
             .header = &.{ .yellow, .bold },

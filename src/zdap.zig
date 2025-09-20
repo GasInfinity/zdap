@@ -1,9 +1,3 @@
-const std = @import("std");
-
-pub const ColorScheme = @import("ColorScheme.zig");
-const Parser = @import("Parser.zig");
-const Help = @import("Help.zig");
-
 pub const Options = struct {
     skip_first_arg: bool = true,
     /// Terminal colors used when printing help and error messages. A default theme is provided.
@@ -26,3 +20,9 @@ pub fn parse(
 
     return parser.parse(Flags, exe_name);
 }
+
+const std = @import("std");
+
+pub const ColorScheme = @import("ColorScheme.zig");
+const Parser = @import("Parser.zig");
+const Help = @import("Help.zig");

@@ -1,9 +1,3 @@
-const ColorScheme = @This();
-
-const std = @import("std");
-
-const Color = std.io.tty.Color;
-
 pub const Style = []const Color;
 
 /// The preceding "Error: ".
@@ -35,3 +29,8 @@ pub const default = ColorScheme{
     .command_name = &.{ .bold, .cyan },
     .option_name = &.{ .bold, .cyan },
 };
+
+const ColorScheme = @This();
+
+const std = @import("std");
+const Color = std.io.tty.Color;

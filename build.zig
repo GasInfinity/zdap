@@ -4,8 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("flags", .{
-        .root_source_file = b.path("src/flags.zig"),
+    const mod = b.addModule("zdap", .{
+        .root_source_file = b.path("src/zdap.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
         .root_module = example_mod,
     });
 
-    example.root_module.addImport("flags", mod);
+    example.root_module.addImport("zdap", mod);
 
     const run_example = b.addRunArtifact(example);
     if (b.args) |args| run_example.addArgs(args);

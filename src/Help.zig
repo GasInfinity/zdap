@@ -1,12 +1,3 @@
-const Help = @This();
-
-const std = @import("std");
-const meta = @import("meta.zig");
-
-const File = std.fs.File;
-const ColorScheme = @import("ColorScheme.zig");
-const Terminal = @import("Terminal.zig");
-
 usage: Usage,
 description: ?[]const u8,
 sections: []const Section,
@@ -17,21 +8,15 @@ pub const Usage = struct {
     command: []const u8,
     body: []const u8,
 
-    pub fn render(usage: Usage, stdout: File, colors: *const ColorScheme) void {
-        var writer_buffer: [256]u8 = undefined;
-        var term = Terminal.init(stdout, &writer_buffer);
-        usage.renderToTerminal(&term, colors);
-        term.flush();
-    }
-
-    pub fn renderToTerminal(usage: Usage, term: *Terminal, colors: *const ColorScheme) void {
+    /// Don't forget to `flush`!
+    pub fn render(usage: Usage, term: Terminal, colors: ColorScheme) void {
         term.print(colors.header, "Usage: ", .{});
         term.print(colors.command_name, "{s}", .{usage.command});
         term.print(colors.usage, "{s}\n", .{usage.body});
     }
 
     pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Usage {
-        var usage = Usage{ .command = command, .body = &.{} };
+        var usage: Usage = .{ .command = command, .body = &.{} };
         var line_len = "Usage: ".len + command.len;
 
         const flag_formats = meta.getFormats(Flags);
@@ -66,9 +51,9 @@ pub const Usage = struct {
             usage.add(arg_usage, &line_len);
         }
 
-        if (info.subcommands.len > 0) {
-            usage.add("<command>", &line_len);
-        }
+        if (meta.hasTrailingField(Flags)) usage.add("...", &line_len);
+        
+        if (info.subcommands.len > 0) usage.add("<command>", &line_len);
 
         return usage;
     }
@@ -93,7 +78,20 @@ const Section = struct {
     const Item = struct {
         name: []const u8,
         desc: ?[]const u8,
+
+        pub fn init(name: []const u8, desc: ?[]const u8) Item {
+            return .{
+                .name = name,
+                .desc = desc,
+            };
+        }
     };
+
+    pub fn init(header: []const u8) Section {
+        return .{
+            .header = header,
+        };
+    }
 
     pub fn add(section: *Section, item: Item) void {
         section.items = section.items ++ .{item};
@@ -101,10 +99,9 @@ const Section = struct {
     }
 };
 
-pub fn render(help: *const Help, stdout: File, colors: *const ColorScheme) void {
-    var write_buffer: [256]u8 = undefined;
-    var term = Terminal.init(stdout, &write_buffer);
-    help.usage.renderToTerminal(&term, colors);
+/// Don't forget to `flush`!
+pub fn render(help: Help, term: Terminal, colors: ColorScheme) void {
+    help.usage.render(term, colors);
 
     if (help.description) |description| {
         term.print(colors.command_description, "\n{s}\n", .{description});
@@ -140,12 +137,10 @@ pub fn render(help: *const Help, stdout: File, colors: *const ColorScheme) void 
             term.print(&.{}, "\n", .{});
         }
     }
-
-    term.flush();
 }
 
 pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Help {
-    comptime var help = Help{
+    comptime var help: Help = .{
         .usage = Usage.generate(Flags, info, command),
         .description = if (@hasDecl(Flags, "description"))
             @as([]const u8, Flags.description) // description must be a string
@@ -155,7 +150,7 @@ pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Help {
     };
 
     const flag_descriptions = meta.getDescriptions(Flags);
-    var options = Section{ .header = "Options:" };
+    var options: Section = .init("Options:");
     for (info.flags) |flag| {
         options.add(.{
             .name = if (flag.switch_char) |ch|
@@ -166,27 +161,29 @@ pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Help {
             .desc = @field(flag_descriptions, flag.field_name),
         });
 
-        const T = meta.unwrapOptional(flag.type);
+        const T = meta.UnwrapOptional(flag.type);
         if (@typeInfo(T) == .@"enum") {
             const variant_descriptions = meta.getDescriptions(T);
             for (@typeInfo(T).@"enum".fields) |variant| {
-                options.add(.{
-                    .name = "  " ++ meta.toKebab(variant.name),
-                    .desc = @field(variant_descriptions, variant.name),
-                });
+                options.add(.init(
+                    "  " ++ meta.toKebab(variant.name),
+                    @field(variant_descriptions, variant.name),
+                ));
             }
         }
     }
 
-    options.add(.{
-        .name = "-h, --help",
-        .desc = "Show this help and exit",
-    });
+    options.add(.init(
+        "-h, --help",
+        "Show this help and exit",
+    ));
 
     help.sections = help.sections ++ .{options};
 
-    if (info.positionals.len > 0) {
-        const pos_descriptions = meta.getDescriptions(@FieldType(Flags, "positional"));
+    if (info.positionals.len > 0 or meta.hasTrailingField(Flags)) {
+        const FlagsPositionals = @FieldType(Flags, meta.special_fields.positional);
+        const pos_descriptions = meta.getDescriptions(FlagsPositionals);
+
         var arguments = Section{ .header = "Arguments:" };
         for (info.positionals) |arg| {
             arguments.add(.{
@@ -194,7 +191,7 @@ pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Help {
                 .desc = @field(pos_descriptions, arg.field_name),
             });
 
-            const T = meta.unwrapOptional(arg.type);
+            const T = meta.UnwrapOptional(arg.type);
             if (@typeInfo(T) == .@"enum") {
                 const variant_descriptions = meta.getDescriptions(T);
                 for (@typeInfo(T).@"enum".fields) |variant| {
@@ -205,17 +202,32 @@ pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Help {
                 }
             }
         }
+
+        if(@hasField(FlagsPositionals, meta.special_fields.trailing)) arguments.add(.init("...", null));
+        
         help.sections = help.sections ++ .{arguments};
     }
+
+
     if (info.subcommands.len > 0) {
-        const cmd_descriptions = meta.getDescriptions(@FieldType(Flags, "command"));
-        var commands = Section{ .header = "Commands:" };
-        for (info.subcommands) |cmd| commands.add(.{
-            .name = cmd.command_name,
-            .desc = @field(cmd_descriptions, cmd.field_name),
-        });
+        var commands: Section = .init("Commands:");
+
+        for (info.subcommands) |cmd| commands.add(.init(
+            cmd.command_name,
+            if(@hasDecl(cmd.type, "description")) @as([]const u8, @field(cmd.type, "description")) else null,
+        ));
+
         help.sections = help.sections ++ .{commands};
     }
 
     return help;
 }
+
+const Help = @This();
+
+const std = @import("std");
+const meta = @import("meta.zig");
+
+const File = std.fs.File;
+const ColorScheme = @import("ColorScheme.zig");
+const Terminal = @import("Terminal.zig");

@@ -1,9 +1,16 @@
 const std = @import("std");
 
+pub const special_fields = struct {
+    pub const subcommand = "-";
+    pub const positional = "--";
+    pub const trailing = "...";
+};
+
 pub const FlagsInfo = struct {
     flags: []const Flag = &.{},
     positionals: []const Positional = &.{},
     subcommands: []const SubCommand = &.{},
+    optional_subcommands: bool = false,
 };
 
 const SubCommand = struct {
@@ -52,62 +59,91 @@ pub fn info(comptime Flags: type) FlagsInfo {
     const switches = getSwitches(Flags);
 
     for (@typeInfo(Flags).@"struct".fields) |field| {
-        if (std.mem.eql(u8, field.name, "positional")) {
-            if (@typeInfo(field.type) != .@"struct") compileError(
-                "'positional' field is not a struct type: {s}",
-                .{@typeName(field.type)},
-            );
+        if (std.mem.eql(u8, field.name, special_fields.positional)) switch (@typeInfo(field.type)) {
+            .@"struct" => |s| {
+                var seen_optional = false;
 
-            var seen_optional = false;
-            for (@typeInfo(field.type).@"struct".fields) |positional| {
-                if (std.mem.eql(u8, positional.name, "trailing")) {
-                    continue;
-                }
-                if (@typeInfo(positional.type) != .optional) {
-                    if (seen_optional) compileError(
-                        "non-optional positional field after optional: {s}",
-                        .{positional.name},
-                    );
-                } else {
-                    seen_optional = true;
-                }
-                command.positionals = command.positionals ++ .{Positional{
-                    .type = positional.type,
-                    .default_value = positional.default_value_ptr,
-                    .field_name = positional.name,
-                    .arg_name = positionalName(positional),
-                }};
-            }
-        } else if (std.mem.eql(u8, field.name, "command")) {
-            if (@typeInfo(field.type) != .@"union") compileError(
-                "command field type is not a union: {s}",
-                .{@typeName(field.type)},
-            );
+                for (s.fields) |positional| {
+                    if (std.mem.eql(u8, positional.name, special_fields.trailing)) {
+                        continue;
+                    }
 
-            for (@typeInfo(field.type).@"union".fields) |cmd| {
+                    if (@typeInfo(positional.type) != .optional) {
+                        if(seen_optional) compileError("non-optional positional field after optional: {s}", .{positional.name});
+                    } else seen_optional = true;
+
+                    command.positionals = command.positionals ++ .{Positional{
+                        .type = positional.type,
+                        .default_value = positional.default_value_ptr,
+                        .field_name = positional.name,
+                        .arg_name = positionalName(positional),
+                    }};
+                }
+
+                continue;
+            },
+            else => compileError("'--' (positional) field is not a struct type: {s}", .{@typeName(field.type)})
+        };
+            
+
+        if (std.mem.eql(u8, field.name, special_fields.subcommand)) {
+            const union_info = switch (@typeInfo(field.type)) {
+                .optional => |o| if(@typeInfo(o.child) == .@"union" and @typeInfo(o.child).@"union".tag_type != null) blk: {
+                    command.optional_subcommands = true;
+                    break :blk @typeInfo(o.child).@"union";
+                } else
+                    compileError("'-' (subcommand) field is not a tagged union {s}", .{@typeName(field.type)}),
+                .@"union" => |u| if(u.tag_type != null)
+                    u
+                else 
+                    compileError("'-' (subcommand) field is not a tagged union {s}", .{@typeName(field.type)}),
+                else => compileError("'-' (subcommand) is not a tagged union: {s}", .{@typeName(field.type)}),
+            };
+
+            for (union_info.fields) |cmd| {
                 command.subcommands = command.subcommands ++ .{SubCommand{
                     .type = cmd.type,
                     .field_name = cmd.name,
                     .command_name = toKebab(cmd.name),
                 }};
             }
-        } else {
-            command.flags = command.flags ++ .{Flag{
-                .type = field.type,
-                .default_value = field.default_value_ptr,
-                .field_name = field.name,
-                .flag_name = "--" ++ toKebab(field.name),
-                .switch_char = @field(switches, field.name),
-            }};
+
+            continue;
+        }
+        
+        switch (@typeInfo(UnwrapOptional(field.type))) {
+            .int, .float, .bool, .@"enum", .pointer => {
+                command.flags = command.flags ++ .{Flag{
+                    .type = field.type,
+                    .default_value = field.default_value_ptr,
+                    .field_name = field.name,
+                    .flag_name = "--" ++ toKebab(field.name),
+                    .switch_char = @field(switches, field.name),
+                }};
+            },
+            else => compileError("can't parse '{s}': {s}", .{field.name, @typeName(field.type)}), 
         }
     }
 
+    if(command.subcommands.len > 0 and command.positionals.len > 0) compileError("cannot have subcommands and positionals at the same time", .{});
+
+    if(command.subcommands.len > 0) {
+        if(!command.optional_subcommands and command.flags.len > 0) compileError("cannot have flags alongside non-optional subcommands", .{});
+
+        for (command.flags) |flag| {
+            if(!flag.isOptional()) compileError("cannot have non-optional flags with subcommands", .{});
+        }
+    }
     return command;
 }
 
-pub fn hasTrailingField(Flags: type) bool {
-    return @hasField(Flags, "positional") and
-        @hasField(@FieldType(Flags, "positional"), "trailing");
+pub fn hasPositionals(comptime Flags: type) bool {
+    return @hasField(Flags, special_fields.positional);
+}
+
+pub fn hasTrailingField(comptime Flags: type) bool {
+    return hasPositionals(Flags) and
+        @hasField(@FieldType(Flags, special_fields.positional), special_fields.trailing);
 }
 
 // A struct with fields identical to T except every field type is ?F and the default value is null.
@@ -134,22 +170,20 @@ fn getSwitches(T: type) FieldAttr(T, u8) {
         }
 
         const switch_val = @field(T.switches, switch_field.name);
+
         if (@TypeOf(switch_val) != comptime_int) {
             compileError("switch value is not a character: {any}", .{switch_val});
         }
-        const switch_char = std.math.cast(u8, switch_val) orelse {
-            compileError("switch value is not a character: {any}", .{switch_val});
-        };
+
+        const switch_char = std.math.cast(u8, switch_val) orelse compileError("switch value is not a character: {any}", .{switch_val});
+
         if (!std.ascii.isAlphanumeric(switch_char)) {
             compileError("switch character is not a letter or digit: {c}", .{switch_char});
         }
 
         for (switch_fields[field_index + 1 ..]) |other_field| {
             const other_val = @field(T.switches, other_field.name);
-            if (switch_val == other_val) compileError(
-                "duplicate switch values: {s} and {s}",
-                .{ switch_field.name, other_field.name },
-            );
+            if (switch_val == other_val) compileError("duplicate switch values: {s} and {s}", .{ switch_field.name, other_field.name });
         }
 
         @field(switches, switch_field.name) = switch_char;
@@ -211,7 +245,7 @@ pub fn compileError(comptime fmt: []const u8, args: anytype) void {
     @compileError("(flags) " ++ std.fmt.comptimePrint(fmt, args));
 }
 
-pub fn unwrapOptional(comptime T: type) type {
+pub fn UnwrapOptional(comptime T: type) type {
     return switch (@typeInfo(T)) {
         .optional => |opt| opt.child,
         else => T,
