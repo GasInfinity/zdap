@@ -1,27 +1,89 @@
-args: []const [:0]const u8,
-current_arg: usize,
+pub const Options = struct {
+    skip_first_arg: bool = true,
+    /// Terminal colors used when printing help and error messages. A default theme is provided.
+    /// To disable colors completely, pass an empty colorscheme: `&.{}`.
+    colors: *const ColorScheme = &.default,
+};
+
+arg_it: zdap.ArgumentsIterator,
 colors: *const ColorScheme,
 
-fn fatal(parser: *const Parser, comptime fmt: []const u8, args: anytype) noreturn {
-    var writer_buffer: [256]u8 = undefined;
-    var stderr = std.fs.File.stderr().writer(&writer_buffer);
-    const term = Terminal.init(.detect(std.fs.File.stderr()), &stderr.interface);
-    term.print(parser.colors.error_label, "Error: ", .{});
-    term.print(parser.colors.error_message, fmt ++ "\n", args);
-    stderr.interface.flush() catch {};
-    std.process.exit(1);
+pub fn parse(
+    comptime Flags: type,
+    /// The name of your program.
+    comptime exe_name: []const u8,
+    args: []const [:0]const u8,
+    options: Options,
+) Flags {
+    var parser = Parser{
+        .arg_it = .init(args, options.skip_first_arg),
+        .colors = options.colors,
+    };
+
+    return parser.innerParse(Flags, exe_name);
 }
 
-pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Flags {
+pub fn parseValue(comptime T: type, it: *zdap.ArgumentsIterator, colors: zdap.ColorScheme, value: []const u8) T {
+    if (T == []const u8 or T == [:0]const u8) return value;
+
+    switch (@typeInfo(T)) {
+        .int => |info| return std.fmt.parseInt(T, value, 0) catch |err| {
+            switch (err) {
+                error.Overflow => zdap.fatal(
+                    colors,
+                    "value out of bounds for {d}-bit {s} integer: {s}",
+                    .{ info.bits, @tagName(info.signedness), value },
+                ),
+                error.InvalidCharacter => zdap.fatal(
+                    colors,
+                    "expected integer number, found '{s}'",
+                    .{value},
+                ),
+            }
+        },
+        .float => return std.fmt.parseFloat(T, value) catch |err| switch (err) {
+            error.InvalidCharacter => zdap.fatal(colors, "expected numerical value, found '{s}'", .{value}),
+        },
+        .@"enum" => |info| {
+            inline for (info.fields) |field| {
+                if (std.mem.eql(u8, value, meta.toKebab(field.name))) {
+                    return @enumFromInt(field.value);
+                }
+            }
+
+            zdap.fatal(colors, "unrecognized option: '{s}'", .{value});
+        },
+        .@"struct" => |s| {
+            it.current -= 1;
+
+            if (@hasDecl(T, meta.special_fields.zdap_parse)) {
+                return @field(T, meta.special_fields.zdap_parse)(it, colors) catch |err| switch (err) {
+                    error.MissingArgument => zdap.fatal(colors, "missing argument for type '{s}'", .{@typeName(T)}),
+                    else => zdap.fatal(colors, "could not parse value of type '{s}': {t}", .{ @typeName(T), err }),
+                };
+            } else {
+                var st: T = undefined;
+
+                inline for (s.fields) |f| {
+                    const next = it.next() orelse zdap.fatal(colors, "missing value '{s}' for compound", .{f.name});
+                    @field(st, f.name) = parseValue(f.type, it, colors, next);
+                }
+
+                return st;
+            }
+        },
+        else => comptime meta.compileError("invalid type: {s}", .{@typeName(T)}),
+    }
+}
+
+fn innerParse(parser: *Parser, comptime Flags: type, comptime command_name: []const u8) Flags {
     const info = comptime meta.info(Flags);
     const help = comptime Help.generate(Flags, info, command_name);
 
     var flags: Flags = undefined;
-    var passed: std.enums.EnumFieldStruct(std.meta.FieldEnum(Flags), bool, false) = .{};
+    var seen: std.enums.EnumFieldStruct(std.meta.FieldEnum(Flags), bool, false) = .{};
 
-    if (comptime meta.hasTrailingField(Flags)) {
-        @field(@field(flags, meta.special_fields.positional), meta.special_fields.trailing) = &.{};
-    }
+    if (comptime meta.hasTrailingField(Flags)) @field(@field(flags, meta.special_fields.positional), meta.special_fields.trailing) = &.{};
 
     // The index from the first argument we parsed.
     var index: usize = 0;
@@ -29,9 +91,9 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
     // The index of the next positional field to be parsed.
     var positional_index: usize = 0;
 
-    next_arg: while (parser.nextArg()) |arg| {
+    next_arg: while (parser.arg_it.next()) |arg| {
         defer index += 1;
-        if (arg.len == 0) parser.fatal("empty argument", .{});
+        if (arg.len == 0) zdap.fatal(parser.colors.*, "empty argument", .{});
 
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             var writer_buffer: [256]u8 = undefined;
@@ -44,25 +106,23 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
 
         inline for (info.subcommands) |cmd| {
             if (std.mem.eql(u8, arg, cmd.command_name)) {
-                if(index > 0) parser.fatal("unexpected subcommand", .{});
+                if (index > 0) zdap.fatal(parser.colors.*, "unexpected subcommand", .{});
 
-                const cmd_flags = parser.parse(cmd.type, command_name ++ " " ++ cmd.command_name);
+                const cmd_flags = parser.innerParse(cmd.type, command_name ++ " " ++ cmd.command_name);
                 const selected_subcommand = &@field(flags, meta.special_fields.subcommand);
 
-                selected_subcommand.* = @unionInit(meta.UnwrapOptional(@TypeOf(selected_subcommand.*)), cmd.field_name, cmd_flags);
+                selected_subcommand.* = @unionInit(meta.Unwrap(@TypeOf(selected_subcommand.*)), cmd.field_name, cmd_flags);
 
-                @field(passed, meta.special_fields.subcommand) = true;
-                std.debug.assert(parser.nextArg() == null); // Subcommands must parse all remaining arguments
+                @field(seen, meta.special_fields.subcommand) = true;
+                std.debug.assert(parser.arg_it.next() == null); // Subcommands must parse all remaining arguments
                 break :next_arg;
             }
         }
 
         if (std.mem.eql(u8, arg, "--")) {
             // Blindly treat remaining arguments as positional.
-            while (parser.nextArg()) |positional| {
-                if(!comptime meta.hasPositionals(Flags)) {
-                    parser.fatal("unexpected argument: {s}", .{positional});
-                }
+            while (parser.arg_it.next()) |positional| {
+                if (!comptime meta.hasPositionals(Flags)) zdap.fatal(parser.colors.*, "unexpected argument: {s}", .{positional});
 
                 const positionals = &@field(flags, meta.special_fields.positional);
 
@@ -78,16 +138,17 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
 
         if (std.mem.startsWith(u8, arg, "--")) {
             inline for (info.flags) |flag| if (std.mem.eql(u8, arg, flag.flag_name)) {
-                @field(flags, flag.field_name) = parser.parseOption(flag.type, flag.flag_name);
-                @field(passed, flag.field_name) = true;
+                const seen_flag = &@field(seen, flag.field_name);
+                parser.storeFlag(Flags, flag, &flags, seen_flag.*);
+                seen_flag.* = true;
                 continue :next_arg;
             };
 
-            parser.fatal("unrecognized flag: {s}", .{arg});
+            zdap.fatal(parser.colors.*, "unrecognized flag: {s}", .{arg});
         }
 
         if (std.mem.startsWith(u8, arg, "-")) {
-            if (arg.len == 1) parser.fatal("unrecognized argument: '-'", .{});
+            if (arg.len == 1) zdap.fatal(parser.colors.*, "unrecognized argument: '-'", .{});
 
             const switch_set = arg[1..];
             next_switch: for (switch_set, 0..) |ch, i| {
@@ -95,26 +156,22 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
                     if (ch == switch_char) {
                         // Removing this check would allow formats like:
                         // `$ <cmd> -abc value-for-a value-for-b value-for-c`
-                        if (flag.type != bool and i < switch_set.len - 1) {
-                            parser.fatal("missing value after switch: {c}", .{switch_char});
-                        }
-                        @field(flags, flag.field_name) = parser.parseOption(
-                            flag.type,
-                            &.{ '-', switch_char },
-                        );
-                        @field(passed, flag.field_name) = true;
+                        if (flag.type != bool and i < switch_set.len - 1) zdap.fatal(parser.colors.*, "missing value after switch: {c}", .{switch_char});
+
+                        const seen_flag = &@field(seen, flag.field_name);
+                        parser.storeFlag(Flags, flag, &flags, seen_flag.*);
+                        seen_flag.* = true;
                         continue :next_switch;
                     }
                 };
 
-                parser.fatal("unrecognized switch: {c}", .{ch});
+                zdap.fatal(parser.colors.*, "unrecognized switch: {c}", .{ch});
             }
 
             continue :next_arg;
         }
-        
 
-        if(comptime meta.hasPositionals(Flags)) {
+        if (comptime meta.hasPositionals(Flags)) {
             const positionals = &@field(flags, meta.special_fields.positional);
 
             if (parser.parsePositional(arg, positional_index, info.positionals, positionals) == .consumed_all) {
@@ -123,25 +180,23 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
 
             positional_index += 1;
             continue;
-        } 
+        }
 
-        parser.fatal("unexpected argument: {s}", .{arg});
+        zdap.fatal(parser.colors.*, "unexpected argument: {s}", .{arg});
     }
 
-    if(info.subcommands.len > 0 and !@field(passed, meta.special_fields.subcommand)) {
-        if(!info.optional_subcommands) {
-            parser.fatal("missing required subcommand", .{});
+    if (info.subcommands.len > 0 and !@field(seen, meta.special_fields.subcommand)) {
+        if (!info.optional_subcommands) {
+            zdap.fatal(parser.colors.*, "missing required subcommand", .{});
         } else @field(flags, meta.special_fields.subcommand) = null;
     }
 
-    inline for (info.flags) |flag| if (!@field(passed, flag.field_name)) {
+    inline for (info.flags) |flag| if (!@field(seen, flag.field_name)) {
         @field(flags, flag.field_name) = meta.defaultValue(flag) orelse
             switch (@typeInfo(flag.type)) {
                 .bool => false,
                 .optional => null,
-                else => {
-                    parser.fatal("missing required flag: {s}", .{flag.flag_name});
-                },
+                else => zdap.fatal(parser.colors.*, "missing required flag: {s}", .{flag.flag_name}),
             };
     };
 
@@ -150,9 +205,7 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
             @field(flags.@"--", pos.field_name) = meta.defaultValue(pos) orelse
                 switch (@typeInfo(pos.type)) {
                     .optional => null,
-                    else => {
-                        parser.fatal("missing required argument: {s}", .{pos.arg_name});
-                    },
+                    else => zdap.fatal(parser.colors.*, "missing required argument: {s}", .{pos.arg_name}),
                 };
         }
     }
@@ -169,19 +222,19 @@ fn parsePositional(
 ) enum { consumed_one, consumed_all } {
     if (index >= positionals_info.len) {
         if (@hasField(@TypeOf(positionals.*), meta.special_fields.trailing)) {
-            @field(positionals.*, meta.special_fields.trailing) = parser.args[parser.current_arg - 1 ..];
-            parser.current_arg = parser.args.len;
+            parser.arg_it.current -= 1;
+            @field(positionals.*, meta.special_fields.trailing) = parser.arg_it.consumeRemaining();
             return .consumed_all;
         }
 
-        parser.fatal("unexpected argument: {s}", .{arg});
+        zdap.fatal(parser.colors.*, "unexpected argument: {s}", .{arg});
     }
 
     switch (index) {
         inline 0...positionals_info.len - 1 => |i| {
             const positional = positionals_info[i];
-            const T = meta.UnwrapOptional(positional.type);
-            @field(positionals, positional.field_name) = parser.parseValue(T, arg);
+            const T = meta.Unwrap(positional.type);
+            @field(positionals, positional.field_name) = parseValue(T, &parser.arg_it, parser.colors.*, arg);
             return .consumed_one;
         },
 
@@ -189,64 +242,36 @@ fn parsePositional(
     }
 }
 
-fn parseOption(parser: *Parser, T: type, option_name: []const u8) T {
-    if (T == bool) return true;
-
-    const value = parser.nextArg() orelse {
-        parser.fatal("missing value for '{s}'", .{option_name});
-    };
-
-    return parser.parseValue(meta.UnwrapOptional(T), value);
-}
-
-fn parseValue(parser: *const Parser, T: type, arg: [:0]const u8) T {
-    if (T == []const u8 or T == [:0]const u8) return arg;
-
-    switch (@typeInfo(T)) {
-        .int => |info| return std.fmt.parseInt(T, arg, 10) catch |err| {
-            switch (err) {
-                error.Overflow => parser.fatal(
-                    "value out of bounds for {d}-bit {s} integer: {s}",
-                    .{ info.bits, @tagName(info.signedness), arg },
-                ),
-                error.InvalidCharacter => parser.fatal(
-                    "expected integer number, found '{s}'",
-                    .{arg},
-                ),
-            }
-        },
-        .float => return std.fmt.parseFloat(T, arg) catch |err| switch (err) {
-            error.InvalidCharacter => {
-                parser.fatal("expected numerical value, found '{s}'", .{arg});
-            },
-        },
-        .@"enum" => |info| {
-            inline for (info.fields) |field| {
-                if (std.mem.eql(u8, arg, meta.toKebab(field.name))) {
-                    return @enumFromInt(field.value);
-                }
-            }
-
-            parser.fatal("unrecognized option: '{s}'", .{arg});
-        },
-        else => comptime meta.compileError("invalid flag type: {s}", .{@typeName(T)}),
-    }
-}
-
-fn nextArg(parser: *Parser) ?[:0]const u8 {
-    if (parser.current_arg >= parser.args.len) {
-        return null;
+fn storeFlag(parser: *Parser, comptime Flags: type, comptime flag: meta.Flag, flags: *Flags, seen: bool) void {
+    if (flag.type == bool) {
+        @field(flags, flag.field_name) = true;
+        return;
     }
 
-    parser.current_arg += 1;
-    return parser.args[parser.current_arg - 1];
+    const arg = parser.arg_it.next() orelse zdap.fatal(parser.colors.*, "missing value for '{s}'", .{flag.flag_name});
+
+    if (comptime meta.BoundedArrayChild(flag.type)) |T| {
+        const bounded: *flag.type = &@field(flags, flag.field_name);
+
+        const item = parseValue(comptime meta.Unwrap(T), &parser.arg_it, parser.colors.*, arg);
+
+        if (seen) {
+            if (bounded.len == bounded.capacity()) zdap.fatal(parser.colors.*, "too many values for '{s}'", .{flag.flag_name});
+            bounded.appendAssumeCapacity(item);
+        } else bounded.* = .initOne(item);
+        return;
+    }
+
+    if (seen) zdap.fatal(parser.colors.*, "duplicated flag '{s}'", .{flag.flag_name});
+    @field(flags, flag.field_name) = parseValue(comptime meta.Unwrap(flag.type), &parser.arg_it, parser.colors.*, arg);
 }
 
 const Parser = @This();
 
 const std = @import("std");
-const meta = @import("meta.zig");
+const zdap = @import("zdap");
+const meta = zdap.meta;
 
-pub const Help = @import("Help.zig");
-pub const ColorScheme = @import("ColorScheme.zig");
-pub const Terminal = @import("Terminal.zig");
+const ColorScheme = zdap.ColorScheme;
+const Help = zdap.Help;
+const Terminal = zdap.Terminal;

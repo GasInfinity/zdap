@@ -1,6 +1,8 @@
 const std = @import("std");
 
 pub const special_fields = struct {
+    pub const zdap_parse = "zdapParse";
+
     pub const subcommand = "-";
     pub const positional = "--";
     pub const trailing = "...";
@@ -49,10 +51,7 @@ pub const Positional = struct {
 };
 
 pub fn info(comptime Flags: type) FlagsInfo {
-    std.debug.assert(@inComptime());
-    if (@typeInfo(Flags) != .@"struct") {
-        compileError("input type is not a struct: {s}", .{@typeName(Flags)});
-    }
+    if (@typeInfo(Flags) != .@"struct") compileError("input type is not a struct: {s}", .{@typeName(Flags)});
 
     var command = FlagsInfo{};
 
@@ -64,13 +63,13 @@ pub fn info(comptime Flags: type) FlagsInfo {
                 var seen_optional = false;
 
                 for (s.fields) |positional| {
-                    if (std.mem.eql(u8, positional.name, special_fields.trailing)) {
-                        continue;
-                    }
+                    if (std.mem.eql(u8, positional.name, special_fields.trailing)) continue;
 
                     if (@typeInfo(positional.type) != .optional) {
-                        if(seen_optional) compileError("non-optional positional field after optional: {s}", .{positional.name});
+                        if (seen_optional) compileError("non-optional positional field after optional: {s}", .{positional.name});
                     } else seen_optional = true;
+
+                    if (!canParseFlagsType(positional.type)) compileError("can't parse positional '{s}': {s}", .{ field.name, @typeName(field.type) });
 
                     command.positionals = command.positionals ++ .{Positional{
                         .type = positional.type,
@@ -82,20 +81,18 @@ pub fn info(comptime Flags: type) FlagsInfo {
 
                 continue;
             },
-            else => compileError("'--' (positional) field is not a struct type: {s}", .{@typeName(field.type)})
+            else => compileError("'--' (positional) field is not a struct type: {s}", .{@typeName(field.type)}),
         };
-            
 
         if (std.mem.eql(u8, field.name, special_fields.subcommand)) {
             const union_info = switch (@typeInfo(field.type)) {
-                .optional => |o| if(@typeInfo(o.child) == .@"union" and @typeInfo(o.child).@"union".tag_type != null) blk: {
+                .optional => |o| if (@typeInfo(o.child) == .@"union" and @typeInfo(o.child).@"union".tag_type != null) blk: {
                     command.optional_subcommands = true;
                     break :blk @typeInfo(o.child).@"union";
-                } else
-                    compileError("'-' (subcommand) field is not a tagged union {s}", .{@typeName(field.type)}),
-                .@"union" => |u| if(u.tag_type != null)
+                } else compileError("'-' (subcommand) field is not a tagged union {s}", .{@typeName(field.type)}),
+                .@"union" => |u| if (u.tag_type != null)
                     u
-                else 
+                else
                     compileError("'-' (subcommand) field is not a tagged union {s}", .{@typeName(field.type)}),
                 else => compileError("'-' (subcommand) is not a tagged union: {s}", .{@typeName(field.type)}),
             };
@@ -110,31 +107,65 @@ pub fn info(comptime Flags: type) FlagsInfo {
 
             continue;
         }
-        
-        switch (@typeInfo(UnwrapOptional(field.type))) {
-            .int, .float, .bool, .@"enum", .pointer => {
-                command.flags = command.flags ++ .{Flag{
-                    .type = field.type,
-                    .default_value = field.default_value_ptr,
-                    .field_name = field.name,
-                    .flag_name = "--" ++ toKebab(field.name),
-                    .switch_char = @field(switches, field.name),
-                }};
-            },
-            else => compileError("can't parse '{s}': {s}", .{field.name, @typeName(field.type)}), 
-        }
+
+        if (!isKnownStruct(field.type) and !canParseFlagsType(field.type)) compileError("can't parse '{s}': {s}", .{ field.name, @typeName(field.type) });
+
+        command.flags = command.flags ++ .{Flag{
+            .type = field.type,
+            .default_value = field.default_value_ptr,
+            .field_name = field.name,
+            .flag_name = "--" ++ toKebab(field.name),
+            .switch_char = @field(switches, field.name),
+        }};
     }
 
-    if(command.subcommands.len > 0 and command.positionals.len > 0) compileError("cannot have subcommands and positionals at the same time", .{});
+    if (command.subcommands.len > 0 and command.positionals.len > 0) compileError("cannot have subcommands and positionals at the same time", .{});
 
-    if(command.subcommands.len > 0) {
-        if(!command.optional_subcommands and command.flags.len > 0) compileError("cannot have flags alongside non-optional subcommands", .{});
+    if (command.subcommands.len > 0) {
+        if (!command.optional_subcommands and command.flags.len > 0) compileError("cannot have flags alongside non-optional subcommands", .{});
 
         for (command.flags) |flag| {
-            if(!flag.isOptional()) compileError("cannot have non-optional flags with subcommands", .{});
+            if (!flag.isOptional()) compileError("cannot have non-optional flags with subcommands", .{});
         }
     }
     return command;
+}
+
+pub fn canParseFlagsType(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .optional => |o| canParseType(o.child),
+        else => canParseType(T),
+    };
+}
+
+pub fn canParseType(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => T == []const u8 or T == [:0]const u8,
+        .@"struct" => canParseStruct(T) or @hasDecl(T, special_fields.zdap_parse),
+        .int, .float, .bool, .@"enum" => true,
+        else => false,
+    };
+}
+
+pub fn canParseStruct(comptime T: type) bool {
+    const ty = @typeInfo(T).@"struct";
+    for (ty.fields) |f| {
+        if (!canParseType(f.type)) return false;
+    }
+    return true;
+}
+
+pub fn isKnownStruct(comptime T: type) bool {
+    return BoundedArrayChild(T) != null;
+}
+
+pub fn BoundedArrayChild(comptime T: type) ?type {
+    if (@typeInfo(T) != .@"struct" or !@hasField(T, "buffer") or !@hasField(T, "len") or @FieldType(T, "len") != usize) return null;
+
+    return switch (@typeInfo(@FieldType(T, "buffer"))) {
+        .array => |a| if (T == zdap.BoundedArray(a.child, a.len)) a.child else null,
+        else => null,
+    };
 }
 
 pub fn hasPositionals(comptime Flags: type) bool {
@@ -242,12 +273,13 @@ pub fn getFormats(T: type) FieldAttr(T, []const u8) {
 }
 
 pub fn compileError(comptime fmt: []const u8, args: anytype) void {
-    @compileError("(flags) " ++ std.fmt.comptimePrint(fmt, args));
+    @compileError("(zdap) " ++ std.fmt.comptimePrint(fmt, args));
 }
 
-pub fn UnwrapOptional(comptime T: type) type {
+pub fn Unwrap(comptime T: type) type {
     return switch (@typeInfo(T)) {
         .optional => |opt| opt.child,
+        .@"struct" => if (BoundedArrayChild(T)) |c| c else T,
         else => T,
     };
 }
@@ -279,3 +311,5 @@ pub fn toKebab(comptime string: []const u8) []const u8 {
 
     return name;
 }
+
+const zdap = @import("zdap");

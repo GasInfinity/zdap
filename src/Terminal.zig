@@ -28,7 +28,8 @@ pub fn print(
 const Terminal = @This();
 
 const std = @import("std");
-const ColorScheme = @import("ColorScheme.zig");
+const zdap = @import("zdap");
+const ColorScheme = zdap.ColorScheme;
 
 const tty = std.io.tty;
 const File = std.fs.File;

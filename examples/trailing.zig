@@ -8,12 +8,12 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(gpa.allocator());
     defer std.process.argsFree(gpa.allocator(), args);
 
-    const options = zdap.parse(args, "trailing", Flags, .{});
+    const options = zdap.Parser.parse(Flags, "trailing", args, .{});
 
     var stdout_buffer: [256]u8 = undefined;
     var stdout_writer = std.fs.File.stderr().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
-    
+
     try std.json.Stringify.value(
         options,
         .{ .whitespace = .indent_2 },

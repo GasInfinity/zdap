@@ -4,16 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("zdap", .{
+    const zdap = b.addModule("zdap", .{
         .root_source_file = b.path("src/zdap.zig"),
         .target = target,
         .optimize = optimize,
     });
 
+    zdap.addImport("zdap", zdap);
+
     const tests_step = b.step("test", "Run tests");
 
     const tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = zdap,
     });
 
     const tests_run = b.addRunArtifact(tests);
@@ -26,6 +28,8 @@ pub fn build(b: *std.Build) void {
             overview,
             colors,
             trailing,
+            structs,
+            bounded,
         },
         "example",
         "Example to run for example step (default = overview)",
@@ -42,7 +46,7 @@ pub fn build(b: *std.Build) void {
         .root_module = example_mod,
     });
 
-    example.root_module.addImport("zdap", mod);
+    example.root_module.addImport("zdap", zdap);
 
     const run_example = b.addRunArtifact(example);
     if (b.args) |args| run_example.addArgs(args);

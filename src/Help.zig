@@ -15,7 +15,7 @@ pub const Usage = struct {
         term.print(colors.usage, "{s}\n", .{usage.body});
     }
 
-    pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Usage {
+    pub fn generate(comptime Flags: type, info: meta.FlagsInfo, command: []const u8) Usage {
         var usage: Usage = .{ .command = command, .body = &.{} };
         var line_len = "Usage: ".len + command.len;
 
@@ -29,14 +29,11 @@ pub const Usage = struct {
 
             flag_usage = flag_usage ++ flag.flag_name;
 
-            if (flag.type != bool) {
-                const format = @field(flag_formats, flag.field_name) orelse flag.flag_name[2..];
-                flag_usage = flag_usage ++ " <" ++ format ++ ">";
-            }
+            const format = @field(flag_formats, flag.field_name) orelse comptime defaultFormat(flag);
 
-            if (flag.isOptional()) {
-                flag_usage = "[" ++ flag_usage ++ "]";
-            }
+            flag_usage = flag_usage ++ (if (format.len > 0) " " ++ format else "");
+
+            if (flag.isOptional()) flag_usage = "[" ++ flag_usage ++ "]";
 
             usage.add(flag_usage, &line_len);
         }
@@ -52,10 +49,25 @@ pub const Usage = struct {
         }
 
         if (meta.hasTrailingField(Flags)) usage.add("...", &line_len);
-        
         if (info.subcommands.len > 0) usage.add("<command>", &line_len);
 
         return usage;
+    }
+
+    fn defaultFormat(comptime flag: meta.Flag) []const u8 {
+        return switch (@typeInfo(meta.Unwrap(flag.type))) {
+            .bool => "",
+            .@"struct" => |s| blk: {
+                var fields: []const u8 = "";
+
+                for (s.fields, 0..) |f, i| {
+                    fields = fields ++ f.name ++ (if (i < s.fields.len - 1) " " else "");
+                }
+
+                break :blk fields;
+            },
+            else => flag.flag_name[2..],
+        };
     }
 
     fn add(usage: *Usage, item: []const u8, line_len: *usize) void {
@@ -161,15 +173,20 @@ pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Help {
             .desc = @field(flag_descriptions, flag.field_name),
         });
 
-        const T = meta.UnwrapOptional(flag.type);
-        if (@typeInfo(T) == .@"enum") {
-            const variant_descriptions = meta.getDescriptions(T);
-            for (@typeInfo(T).@"enum".fields) |variant| {
-                options.add(.init(
-                    "  " ++ meta.toKebab(variant.name),
-                    @field(variant_descriptions, variant.name),
-                ));
-            }
+        // TODO: This can be its own method
+        const T = meta.Unwrap(flag.type);
+        switch (@typeInfo(T)) {
+            inline .@"struct", .@"enum" => |ty| {
+                const descriptions = meta.getDescriptions(T);
+
+                for (ty.fields) |field| {
+                    options.add(.{
+                        .name = "  " ++ meta.toKebab(field.name),
+                        .desc = @field(descriptions, field.name),
+                    });
+                }
+            },
+            else => {},
         }
     }
 
@@ -191,30 +208,33 @@ pub fn generate(Flags: type, info: meta.FlagsInfo, command: []const u8) Help {
                 .desc = @field(pos_descriptions, arg.field_name),
             });
 
-            const T = meta.UnwrapOptional(arg.type);
-            if (@typeInfo(T) == .@"enum") {
-                const variant_descriptions = meta.getDescriptions(T);
-                for (@typeInfo(T).@"enum".fields) |variant| {
-                    arguments.add(.{
-                        .name = "  " ++ meta.toKebab(variant.name),
-                        .desc = @field(variant_descriptions, variant.name),
-                    });
-                }
+            const T = meta.Unwrap(arg.type);
+            switch (@typeInfo(T)) {
+                inline .@"struct", .@"enum" => |ty| {
+                    const descriptions = meta.getDescriptions(T);
+
+                    for (ty.fields) |field| {
+                        arguments.add(.{
+                            .name = "  " ++ meta.toKebab(field.name),
+                            .desc = @field(descriptions, field.name),
+                        });
+                    }
+                },
+                else => {},
             }
         }
 
-        if(@hasField(FlagsPositionals, meta.special_fields.trailing)) arguments.add(.init("...", null));
-        
+        if (@hasField(FlagsPositionals, meta.special_fields.trailing)) arguments.add(.init("...", null));
+
         help.sections = help.sections ++ .{arguments};
     }
-
 
     if (info.subcommands.len > 0) {
         var commands: Section = .init("Commands:");
 
         for (info.subcommands) |cmd| commands.add(.init(
             cmd.command_name,
-            if(@hasDecl(cmd.type, "description")) @as([]const u8, @field(cmd.type, "description")) else null,
+            if (@hasDecl(cmd.type, "description")) @as([]const u8, @field(cmd.type, "description")) else null,
         ));
 
         help.sections = help.sections ++ .{commands};
