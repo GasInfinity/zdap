@@ -58,10 +58,11 @@ pub fn BoundedArray(comptime T: type, comptime n: usize) type {
     };
 }
 
-pub fn fatal(colors: ColorScheme, comptime fmt: []const u8, args: anytype) noreturn {
+pub fn fatal(colors: ColorScheme, help: Help, comptime fmt: []const u8, args: anytype) noreturn {
     var writer_buffer: [256]u8 = undefined;
     var stderr = std.fs.File.stderr().writer(&writer_buffer);
     const term = Terminal.init(.detect(std.fs.File.stderr()), &stderr.interface);
+    help.usage.render(term, colors);
     term.print(colors.error_label, "Error: ", .{});
     term.print(colors.error_message, fmt ++ "\n", args);
     stderr.interface.flush() catch {};

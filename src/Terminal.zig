@@ -31,5 +31,5 @@ const std = @import("std");
 const zdap = @import("zdap");
 const ColorScheme = zdap.ColorScheme;
 
-const tty = std.io.tty;
+const tty = std.Io.tty;
 const File = std.fs.File;

@@ -11,7 +11,7 @@ pub fn main() !void {
     _ = zdap.Parser.parse(Flags, "colors", args, .{
         // Use the `colors` option to provide a colorscheme for the error/help messages.
         // Specifying this as empty: `.colors = &.{}` will disable colors.
-        // Each field is a list of type `std.io.tty.Color`.
+        // Each field is a list of type `std.Io.tty.Color`.
         .colors = &zdap.ColorScheme{
             .error_label = &.{ .bright_red, .bold },
             .command_name = &.{.bright_green},
