@@ -1,3 +1,9 @@
+# Deprecated / *Moved to codeberg*
+
+`zdap` is deprecated.
+  
+However, `plz`, a similar but more powerful alternative for zig 0.16.0, is available on [Codeberg](https://codeberg.org/GasInfinity/plz)
+
 # zdap
 
 ![Zig support](https://img.shields.io/badge/Zig-0.15.x-color?logo=zig&color=%23f3ab20)
